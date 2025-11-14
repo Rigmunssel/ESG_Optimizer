@@ -1,0 +1,11 @@
+# Refinitiv APIs
+refinitiv-data==1.6.2
+eikon==1.1.17
+
+# Data handling
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.12.0
+
+# Environment variables
+python-dotenv==1.0.1
