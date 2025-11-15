@@ -121,6 +121,76 @@ def get_yearly_price_and_cov_matrics():
 
 
 
+def get_historical_esg_aggressive():
+    """Most aggressive version - maximize batch size"""
+    
+    rics = get_rics()
+    print(f"Fetching ESG data for {len(rics)} RICs...")
+    
+    # Define the 15-year range
+    years = list(range(2010, 2026))  # 2010-2025
+    
+    all_esg_data = []
+    
+    # If we have less than 200 RICs, process all at once per year
+    if len(rics) <= 200:
+        batch_size = len(rics)  # All RICs in one go
+    else:
+        batch_size = 200  # Max safe batch size
+    
+    print(f"Using batch size: {batch_size}")
+    
+    for batch_start in range(0, len(rics), batch_size):
+        batch_rics = rics[batch_start:batch_start + batch_size]
+        print(f"Processing RICs {batch_start} to {batch_start + len(batch_rics) - 1}...")
+        
+        for year in years:
+            try:
+                esg_df, err = ek.get_data(
+                    instruments=batch_rics,
+                    fields=["TR.TRESGScore", "TR.ESGDate"],
+                    parameters={"SDate": f"{year}-01-01", "EDate": f"{year}-12-31"}
+                )
+                
+                if esg_df is not None and not esg_df.empty:
+                    esg_df['Year'] = year
+                    all_esg_data.append(esg_df)
+                    print(f"  Year {year}: ✓ ({len(esg_df)} records)")
+                else:
+                    print(f"  Year {year}: ✗ No data")
+                    
+            except Exception as e:
+                print(f"  Year {year}: Error - {str(e)[:100]}...")
+                continue
+        
+        time.sleep(1)  # Slightly longer delay between large batches
+    
+    if all_esg_data:
+        esg_full = pd.concat(all_esg_data, ignore_index=True)
+        
+        # Create data folder if it doesn't exist
+        data_folder = "data"
+        if not os.path.exists(data_folder):
+            os.makedirs(data_folder)
+            print(f"Created folder: {data_folder}")
+        
+        # Save to data folder
+        file_path = os.path.join(data_folder, "ESG_yearly_2010_2025.csv")
+        esg_full.to_csv(file_path, index=False)
+        print(f"\n✅ Saved {len(esg_full)} ESG records to {file_path}")
+        
+        # Quick stats
+        ric_count = esg_full['Instrument'].nunique()
+        year_count = esg_full['Year'].nunique()
+        total_possible = ric_count * year_count
+        coverage_pct = (len(esg_full) / total_possible) * 100
+        
+        print(f"Coverage: {len(esg_full)}/{total_possible} possible records ({coverage_pct:.1f}%)")
+        return esg_full
+    else:
+        print("❌ No data retrieved")
+        return None
+
 
 
 def get_price_info():
