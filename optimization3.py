@@ -39,8 +39,11 @@ def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
     ]
 
     # Solve the problem
+
+    
     problem = cp.Problem(objective, constraints)
-    problem.solve()
+    problem.solve(solver=cp.CLARABEL)    
+
 
     # checking if portfolio with such constraints exists and only returning ones that do
     if problem.status == 'optimal':
@@ -50,66 +53,44 @@ def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
         return None
     
     
-                                               ### fake data ###
-def generate_data(n_assets=500):
+
+# Real Data
+def load_real_data(returns_file,cov_file,esg_file):
+    
+    returns_data = pd.read_csv(returns_file, index_col=0).squeeze()
+    covariance_matrix_data = pd.read_csv(cov_file, index_col=0)
+    esg_data = pd.read_csv(esg_file, index_col=0).squeeze()
         
-    np.random.seed(42)
+    # Verify returns and covariance match
+    if not np.array_equal(returns_data.index, covariance_matrix_data.index):
+        raise ValueError("Returns and covariance RICs don't match!")
+    if not np.array_equal(covariance_matrix_data.index, covariance_matrix_data.columns):
+        raise ValueError("Covariance matrix not square!")
     
-    # Base parameters (more realistic)
-    base_volatility = 0.15 / np.sqrt(252)  # 15% annual vol → daily
-    base_return = 0.08 / 252  # 8% annual return → daily
+        # Use returns RICs as master list
+    master_rics = returns_data.index.tolist()
     
-    # Expected returns with some dispersion
-    ER = np.random.normal(base_return, base_return * 0.5, n_assets)
-    ER = np.clip(ER, base_return * 0.3, base_return * 2.0)  # Reasonable bounds
+    # Keep only ESG scores for stocks that exist in returns data
+    esg_aligned = esg_data[esg_data.index.isin(master_rics)]
     
-    # Generate realistic correlation structure
-    # Use a market factor model
-    market_betas = np.random.uniform(0.7, 1.3, n_assets)  # Realistic betas
-    specific_vol = np.random.uniform(0.1, 0.3, n_assets) * base_volatility
+    # Align all data to the common RICs
+    common_rics = esg_aligned.index.tolist()
+    returns_aligned = returns_data.loc[common_rics]
+    cov_aligned = covariance_matrix_data.loc[common_rics, common_rics]
     
-    # Create correlation matrix with market structure
-    corr_matrix = np.outer(market_betas, market_betas) * 0.3  # Market explains 30% of correlation
-    np.fill_diagonal(corr_matrix, 1.0)  # Perfect self-correlation
+    print(f" Dropped {len(master_rics) - len(common_rics)} stocks without ESG data")
+    print(f" Dropped {len(esg_data) - len(common_rics)} extra ESG scores")
+
+    # Convert to arrays
+    ER = returns_aligned.values
+    Sigma = cov_aligned.values
+    ESG = esg_aligned.values
     
-    # Add some random correlation noise
-    noise = np.random.uniform(-0.1, 0.1, (n_assets, n_assets))
-    noise = (noise + noise.T) / 2  # Make symmetric
-    np.fill_diagonal(noise, 0)  # No noise on diagonal
     
-    corr_matrix = corr_matrix + noise
-    corr_matrix = np.clip(corr_matrix, -0.5, 0.9)  # Realistic correlation bounds
-    
-    # Ensure positive definite
-    eigenvalues = np.linalg.eigvals(corr_matrix)
-    min_eigenval = np.min(eigenvalues)
-    if min_eigenval < 1e-6:
-        corr_matrix += np.eye(n_assets) * (abs(min_eigenval) + 1e-6)
-    
-    # Create volatility vector
-    volatilities = np.random.uniform(0.8, 1.5, n_assets) * base_volatility
-    
-    # Convert to covariance matrix
-    D = np.diag(volatilities)
-    Sigma = D @ corr_matrix @ D
-    
-    # Add idiosyncratic noise to ensure no zero risk
-    Sigma += np.eye(n_assets) * (base_volatility * 0.1) ** 2
-    
-    # ESG scores with realistic distribution
-    esg_scores = np.random.beta(2, 2, n_assets) * 40 + 50  # Centered around 70
-    
-    print(f"Generated data statistics:")
-    print(f"  Return range: [{ER.min():.6f}, {ER.max():.6f}]")
-    print(f"  Volatility range: [{np.sqrt(np.diag(Sigma)).min():.6f}, {np.sqrt(np.diag(Sigma)).max():.6f}]")
-    print(f"  Correlation range: [{np.min(corr_matrix):.3f}, {np.max(corr_matrix):.3f}]")
-    print(f"  ESG range: [{esg_scores.min():.1f}, {esg_scores.max():.1f}]")
-    
-    return ER, Sigma, esg_scores
+    return ER,Sigma,ESG
 
 
         ### Ääriarvot ###
-
 
 
 def find_achievable_return_range(ER, Sigma, esg_scores, lambda_target):
@@ -196,18 +177,42 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
 def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
     """Plot efficient frontiers for different ESG targets"""
      
-    # Find maximum possible ESG (Highest ESG stock)
-    max_esg = np.max(esg_scores)  # Can be used when defining ESG targets by making targets % of MAX ESG. Have to check with real data if this is useful.
-
+    # Find maximum possible ESG (Highest ESG stock), / nyt ei käytetty mutta muuttaa tähän jos toi percentile tapa ei anna järkeviä tuloksia
+    esg_min, esg_max = esg_scores.min(), esg_scores.max()
     
-    # Define multiple ESG targets 
-    esg_targets = [0,50, 60, 65, 70] # Now just random numbers
+    # Adjust ESG targets based on your actual ESG score range 
+    
+    #targetit voi muuttaa
+    esg_targets = [
+        np.percentile(esg_scores, 0),    # No constraint (minimum)
+        np.percentile(esg_scores, 50),   
+        np.percentile(esg_scores, 65),   # Top 60% (better than worst 40%)
+        np.percentile(esg_scores, 80),   
+        np.percentile(esg_scores, 95)    
+    ]
+    
+    
+    
     colors = ['red', 'orange', 'lightgreen', 'blue', 'darkgreen']
-    labels = ['No ESG Constraint', '70% Max ESG', '75% Max ESG', '85% Max ESG', '95% Max ESG']
+    labels = [
+        'No ESG Constraint (All stocks)',
+        'Top 50% ESG Stocks',
+        'Top 65% ESG Stocks', 
+        'Top 80% ESG Stocks',
+        'Top 95% ESG Stocks'
+    ]
+    
+    
+    # Print the actual ESG thresholds / varmistus mitkä ne rajat on
+    print("ESG Percentile Targets:")
+    percentiles = [0, 30, 50, 70, 95]
+    for p, target in zip(percentiles, esg_targets):
+        print(f"  {p}th percentile: ESG ≥ {target:.1f}")
+    
     
     ''' Plotting the figure  '''
     plt.figure(figsize=(12, 8))
-    number_of_points = 15
+    number_of_points = 10  ## tätä muuttamalla muuttuu frontierin tarkkuus, mutta isommat arvot viä laskutehoo 
     
     for esg_target, color, label in zip(esg_targets, colors, labels): #loop that calculates the efficient frontier with different ESG constraints
                 
@@ -217,9 +222,9 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
         
         # Check if we got valid results (atleast half of the points to form the Efficient frontier) and plots
         if returns and len(returns) >= number_of_points / 2:
-            # Convert to annualized for better interpretation OIKEELLA DATALLLA TÄYTYY MUUTTAA❌❌❌❌❌
-            annual_returns = np.array(returns) * 252 * 100
-            annual_risks = np.array(risks) * np.sqrt(252) * 100
+            # Convert to annualized for better interpretation 
+            annual_returns = np.array(returns) 
+            annual_risks = np.array(risks) 
             
             plt.plot(annual_risks, annual_returns, 'o-', color=color, 
                     linewidth=2, markersize=5, label=label, alpha=0.8)
@@ -236,48 +241,15 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
     plt.tight_layout()
     plt.show()
 
-    # Testi
+    
 if __name__ == "__main__":
     
-    print("Generating sample data...")
-    ER, Sigma, esg_scores = generate_data(n_assets=500)
+    ER, Sigma, esg_scores = load_real_data(returns_file="Yearly_Returns.csv", cov_file="Covariance_Matrix.csv",esg_file="ESG_scores.csv")
     
-    print(f"\nData Summary:")
-    print(f"  Number of assets: {len(ER)}")
-    print(f"  Expected returns - Min: {ER.min():.6f}, Max: {ER.max():.6f}")
-    print(f"  ESG scores - Min: {esg_scores.min():.1f}, Max: {esg_scores.max():.1f}")
-    print(f"  Covariance matrix condition number: {np.linalg.cond(Sigma):.2f}")
-    
-    # Test single portfolio first
-    print(f"\n{'='*50}")
-    print("TESTING SINGLE PORTFOLIO")
-    print(f"{'='*50}")
-    
-    # Use a moderate ESG target that's likely achievable
-    test_eta = 0.000007
-    test_lambda = 70.0
-    
-    print(f"Testing with return target: {test_eta:.6f}, ESG target: {test_lambda:.1f}")
-    weights = optimize_portfolio_cvxpy(ER, Sigma, esg_scores, test_eta, test_lambda)
-    
-    if weights is not None:
-        print("✅ Single portfolio optimization successful!")
-        print(f"   Actual return: {ER @ weights:.6f}")
-        print(f"   Actual risk: {np.sqrt(weights @ Sigma @ weights):.6f}")
-        print(f"   Actual ESG: {esg_scores @ weights:.1f}")
-        print(f"   Assets used: {(weights > 0.001).sum()}/{len(weights)}")
-    else:
-        print("❌ Single portfolio optimization failed")
-        print("   Trying with lower ESG target...")
-        weights = optimize_portfolio_cvxpy(ER, Sigma, esg_scores, test_eta, 60.0)
-        if weights is not None:
-            print("✅ Success with lower ESG target!")
-
     
     # Plot efficient frontier
     print(f"\n{'='*50}")
     print("PLOTTING EFFICIENT FRONTIER")
     print(f"{'='*50}")
-    
-
+        
     plot_multiple_esg_frontiers(ER, Sigma, esg_scores)
