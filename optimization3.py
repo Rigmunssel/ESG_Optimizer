@@ -30,17 +30,26 @@ def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
     #  Objective function: minimize portfolio variance (cp.quad_form computes portfolio variance)
     objective = cp.Minimize(cp.quad_form(x, Sigma))
     
-    #  Constraints
+
+    #  Constraints ESG calculated as weighted average
     constraints = [
         ER @ x >= ER_target,            # Return constraint
-        esg_scores @ x >= ESG_target,   # ESG constraint
+        esg_scores @ x >= ESG_target,   # ESG constraint   
         cp.sum(x) == 1,                 # Budget constraint
         x >= 0                          # No short selling
     ]
-
+    '''
+    # Constraints ESG calculated as hard cap results to more infeasible optimizations but allows short selling easilly
+    constraints = [
+    ER @ x >= ER_target,
+    cp.sum(x) == 1,
+    #x >= 0,   # short selling can be allowed when using hard cap
+       # Multiply by boolean mask - sets low ESG stocks to zero weight. 
+    cp.multiply((esg_scores < ESG_target), x) == 0
+]
+    '''
     # Solve the problem
 
-    
     problem = cp.Problem(objective, constraints)
     problem.solve(solver=cp.CLARABEL)    
 
@@ -80,7 +89,7 @@ def load_real_data(returns_file,cov_file,esg_file):
     
     print(f" Dropped {len(master_rics) - len(common_rics)} stocks without ESG data")
     print(f" Dropped {len(esg_data) - len(common_rics)} extra ESG scores")
-
+    
     # Convert to arrays
     ER = returns_aligned.values
     Sigma = cov_aligned.values
@@ -152,6 +161,8 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
     # From max and min returns create return targets, that will be optimized
     return_targets = np.linspace(min_return, max_return, n_points)
     
+    portfolio_sizes = []  # Track number of stocks
+
     #storing values of each optimization with different return targets
     returns = []
     risks = []
@@ -163,6 +174,8 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
         weights = optimize_portfolio_cvxpy(ER, Sigma, esg_scores, Rtarget, ESG_target) #optimizing weights for each Return target
         
         if weights is not None:
+            #n_stocks = np.sum(weights > 0.001)  # Count stocks with >0.1% weight
+            #portfolio_sizes.append(n_stocks)
             portfolio_return = ER @ weights                         # return of portfolio (weighted average)
             portfolio_risk = np.sqrt(weights @ Sigma @ weights)     # SD of portfolio (sq of sum of all variance/covariance terms)
             portfolio_esg = esg_scores @ weights                    #  ESG score of portfolio (Weighted average)
@@ -170,11 +183,15 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
             returns.append(portfolio_return)
             risks.append(portfolio_risk)
             actual_esg_scores.append(portfolio_esg)
+        
+        # Print summary
+        #if portfolio_sizes:
+        #   print(f"  Portfolio sizes: {min(portfolio_sizes)} to {max(portfolio_sizes)} stocks")
     
     return returns, risks, actual_esg_scores
 
 
-def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
+def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):  
     """Plot efficient frontiers for different ESG targets"""
      
     # Find maximum possible ESG (Highest ESG stock), / nyt ei käytetty mutta muuttaa tähän jos toi percentile tapa ei anna järkeviä tuloksia
@@ -212,7 +229,7 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
     
     ''' Plotting the figure  '''
     plt.figure(figsize=(12, 8))
-    number_of_points = 10  ## tätä muuttamalla muuttuu frontierin tarkkuus, mutta isommat arvot viä laskutehoo 
+    number_of_points = 10  ## tätä muuttamalla muuttuu frontierin tarkkuus, mutta isommat arvot viä laskutehoo. 100 pistettä ni tulee ok tulokset
     
     for esg_target, color, label in zip(esg_targets, colors, labels): #loop that calculates the efficient frontier with different ESG constraints
                 
@@ -227,7 +244,7 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
             annual_risks = np.array(risks) 
             
             plt.plot(annual_risks, annual_returns, 'o-', color=color, 
-                    linewidth=2, markersize=5, label=label, alpha=0.8)
+                    linewidth=2, markersize=3, label=label, alpha=0.8)
             print(f"  ✅ {len(returns)} points")
         else:
             print(f"  ❌ Not enough points for {label}")
@@ -241,15 +258,52 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
     plt.tight_layout()
     plt.show()
 
+
+
+def plot_efficient_surface(ER, Sigma, esg_scores):
+    ''' kannattaa ajaa isommalla määrällä esg leveleitä, jotta kuvaajasta tulee sulavampi, varmaa pöytäkone hommia. Nyt vielä karvalakkiversio visuaalisesti muutenkin '''
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    esg_levels = [
+            # No constraint (minimum)
+        np.percentile(esg_scores, 50),   
+        np.percentile(esg_scores, 60),   
+        np.percentile(esg_scores, 70),   
+        np.percentile(esg_scores, 80),   
+        np.percentile(esg_scores, 90),   
+        np.percentile(esg_scores, 95)
+          
+    ]
+    
+    
+    risk_grid, return_grid = [], []
+    
+    for esg_target in esg_levels:
+        returns, risks, _ = calculate_efficient_frontier(ER, Sigma, esg_scores, esg_target)
+        risk_grid.append(risks)
+        return_grid.append(returns)
+    
+    # Create surface
+    X, Y = np.meshgrid(range(len(risk_grid[0])), esg_levels)
+    Z = np.array(return_grid)
+    
+    surf = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8)
+    ax.set_xlabel('Risk Level')
+    ax.set_ylabel('ESG Target')
+    ax.set_zlabel('Expected Return')
+    plt.title('3D Visuaalinen Karvalakkimalli', fontsize=14)
+    plt.colorbar(surf)
+    plt.show()
     
 if __name__ == "__main__":
     
     ER, Sigma, esg_scores = load_real_data(returns_file="Yearly_Returns.csv", cov_file="Covariance_Matrix.csv",esg_file="ESG_scores.csv")
-    
     
     # Plot efficient frontier
     print(f"\n{'='*50}")
     print("PLOTTING EFFICIENT FRONTIER")
     print(f"{'='*50}")
         
-    plot_multiple_esg_frontiers(ER, Sigma, esg_scores)
+    plot_multiple_esg_frontiers(ER, Sigma, esg_scores)    
+    #plot_efficient_surface(ER, Sigma, esg_scores)
