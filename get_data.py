@@ -5,6 +5,7 @@ import refinitiv.data as rd
 import eikon as ek
 import pandas as pd
 import time
+import numpy as np
 
 
 # Root data directory
@@ -80,44 +81,82 @@ def get_prices():
 
 
 def get_yearly_price_and_cov_matrics():
-    """Writes yearly returns and covariance matrix based on weekly prices."""
-    price_path = os.path.join(DATA_DIR, "weekly_prices.csv")
-    prices_full = pd.read_csv(price_path)
+    df = pd.read_csv('data/monthly_prices.csv')
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    # Remove rows with missing prices
+    df = df.dropna(subset=['Price Close'])
+
+    # Create year-month key
+    df['YearMonth'] = df['Date'].dt.to_period('M')
+    df['Day'] = df['Date'].dt.day
+
+    # ---- 1. Find most common day per year-month ----
+    # Count occurrences of each day within each month
+    day_counts = (
+        df.groupby(['YearMonth', 'Day'])
+          .size()
+          .reset_index(name='Count')
+    )
+
+    # For each month, pick the day with the highest count
+    modal_days = (
+        day_counts.sort_values(['YearMonth', 'Count'], ascending=[True, False])
+                  .drop_duplicates(subset='YearMonth')  # keep top row per month
+                  .set_index('YearMonth')['Day']
+                  .to_dict()
+    )
+
+    # ---- 2. Filter rows to keep only the modal day for each month ----
+    df = df[df['Day'] == df['YearMonth'].map(modal_days)]
+    print(len(df))
+    df = df.drop_duplicates(subset=['Date', 'Instrument'])
+    print(len(df))
+    # ---- 3. Pivot ----
+    prices = df.pivot(index='Date', columns='Instrument', values='Price Close')
+
+    # Drop incomplete time series
+    prices = prices.dropna(axis=1)
     
+    # Calculate monthly returns
+    monthly_returns = prices.pct_change().dropna()
     
-    # Drop the last column which contains aggregate close for sp500 "close"
-    if "CLOSE" in prices_full.columns:
-        prices_full = prices_full.drop(columns=["CLOSE"])
-        print("Dropped 'CLOSE' column")
+    # Calculate annualized average returns
+    yearly_returns = monthly_returns.mean() * 12
     
-    # Set date index if present
-    if "Date" in prices_full.columns:
-        prices_full = prices_full.set_index("Date")
-    
-    # Convert everything to numeric
-    prices_full = prices_full.apply(pd.to_numeric, errors="coerce")
-    
-    # Drop stocks with any missing values
-    prices_clean = prices_full.dropna(axis=1)
-    print(f"Original stocks: {len(prices_full.columns)}, After dropping missing: {len(prices_clean.columns)}")
-    
-    # Calculate weekly returns
-    returns = prices_clean.pct_change().dropna()
-    
-    # Calculate ANNUALIZED average return (mean * 52 weeks)
-    avg_yearly_returns = returns.mean() * 52
-    
-    # Calculate ANNUALIZED covariance matrix (cov * 52 weeks)
-    cov_matrix = returns.cov() * 52
+    # Calculate covariance matrix (annualized)
+    cov_matrix = monthly_returns.cov() * 12
     
     # Save results
-    yearly_path = os.path.join(DATA_DIR, "Yearly_Returns.csv")
-    avg_yearly_returns.to_csv(yearly_path, header=["return"])
+    yearly_returns.to_csv('data/yearly_returns.csv', header=['Yearly Return'])
+    cov_matrix.to_csv('data/covariance_matrix.csv')
     
-    cov_path = os.path.join(DATA_DIR, "Covariance_Matrix.csv")
-    cov_matrix.to_csv(cov_path)
+    print(f"Processed {len(prices.columns)} stocks with complete data")
+    print(f"Date range: {prices.index.min()} to {prices.index.max()}")
+
+
+def get_esg_scores():
+    esg = pd.read_csv("data/ESG_FULL.csv")
+    inst = pd.read_csv("data/Yearly_returns.csv")['Instrument'].unique()
+    esg = esg[esg['instrument'].isin(inst)]
+
+    # Count valid MSCI and Refinitiv separately
+    msci_counts = esg.groupby('instrument')['esgScoreMSCI'].count()
+    refi_counts = esg.groupby('instrument')['esgScoreRefinitiv'].count()
+
+    # Instruments with >=5 valid scores
+    good_msci = msci_counts[msci_counts >= 1].index
+    good_refi = refi_counts[refi_counts >= 1].index
+
+    # Print those missing enough data
+    print("Missing >=5 MSCI scores:");  [print(i) for i in msci_counts[msci_counts < 1].index]
+    print("Missing >=5 Refinitiv scores:");  [print(i) for i in refi_counts[refi_counts < 1].index]
+
+    # Output files
+    esg.groupby('instrument')['esgScoreMSCI'].mean().loc[good_msci].to_csv("data/ESG_AVG_MSCI.csv")
     
-    return avg_yearly_returns, cov_matrix, prices_clean.columns.tolist()
+    esg.groupby('instrument')['esgScoreRefinitiv'].mean().loc[good_refi].to_csv("data/ESG_AVG_REFINITIV.csv")
+
 
 
 
@@ -231,4 +270,5 @@ def get_price_info():
     print(list(missing_2018[missing_2018].index))
 
 if __name__ == "__main__":
-    get_yearly_price_and_cov_matrics()
+    #get_yearly_price_and_cov_matrics()
+    get_esg_scores()
