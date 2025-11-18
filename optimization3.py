@@ -3,7 +3,6 @@ import pandas as pd
 import cvxpy as cp
 import matplotlib.pyplot as plt
 
-#Muuta lopussa
 plt.style.use("bmh")
 
 def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
@@ -30,7 +29,7 @@ def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
     #  Objective function: minimize portfolio variance (cp.quad_form computes portfolio variance)
     objective = cp.Minimize(cp.quad_form(x, Sigma))
     
-
+    
     #  Constraints ESG calculated as weighted average
     constraints = [
         ER @ x >= ER_target,            # Return constraint
@@ -49,9 +48,8 @@ def optimize_portfolio_cvxpy(ER, Sigma, esg_scores, ER_target, ESG_target):
 ]
     '''
     # Solve the problem
-
     problem = cp.Problem(objective, constraints)
-    problem.solve(solver=cp.CLARABEL)    
+    problem.solve(solver=cp.CLARABEL, max_iter=100000)    
 
 
     # checking if portfolio with such constraints exists and only returning ones that do
@@ -95,6 +93,12 @@ def load_real_data(returns_file,cov_file,esg_file):
     Sigma = cov_aligned.values
     ESG = esg_aligned.values
     
+    # There was eigenvalues of -0.0000 in cov_matrix, from rounding errors. To combat that
+    min_eigenval = np.min(np.linalg.eigvals(Sigma))
+    if min_eigenval < 1e-8:
+        Sigma = Sigma + np.eye(len(Sigma)) * (abs(min_eigenval) + 1e-6)
+        print("✅ Added regularization to covariance matrix")
+
     
     return ER,Sigma,ESG
 
@@ -145,6 +149,10 @@ def find_achievable_return_range(ER, Sigma, esg_scores, lambda_target):
         prob_min_simple.solve()
         min_achievable_return = ER @ x_min_simple.value
         print(f" ❌ Using unconstrained min return: {min_achievable_return:.6f}")
+        
+    # combatting inaccurate rounding
+    max_achievable_return = max_achievable_return * 0.99
+    min_achievable_return = min_achievable_return * 1.01
     
     return min_achievable_return, max_achievable_return
 
@@ -158,11 +166,11 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
     # First find what's actually achievable
     min_return, max_return = find_achievable_return_range(ER, Sigma, esg_scores, ESG_target)
     
+   
     # From max and min returns create return targets, that will be optimized
     return_targets = np.linspace(min_return, max_return, n_points)
     
     portfolio_sizes = []  # Track number of stocks
-
     #storing values of each optimization with different return targets
     returns = []
     risks = []
@@ -187,6 +195,8 @@ def calculate_efficient_frontier(ER, Sigma, esg_scores, ESG_target, n_points=15)
         # Print summary
         #if portfolio_sizes:
         #   print(f"  Portfolio sizes: {min(portfolio_sizes)} to {max(portfolio_sizes)} stocks")
+        #else:
+        #    print(f"  ❌ No feasible portfolios found")
     
     return returns, risks, actual_esg_scores
 
@@ -202,34 +212,46 @@ def plot_multiple_esg_frontiers(ER, Sigma, esg_scores):
     #targetit voi muuttaa
     esg_targets = [
         np.percentile(esg_scores, 0),    # No constraint (minimum)
-        np.percentile(esg_scores, 50),   
-        np.percentile(esg_scores, 65),   # Top 60% (better than worst 40%)
-        np.percentile(esg_scores, 80),   
-        np.percentile(esg_scores, 95)    
+        np.percentile(esg_scores, 50),
+        np.percentile(esg_scores, 60),
+        np.percentile(esg_scores, 70),                                       
+        np.percentile(esg_scores, 80),
+        np.percentile(esg_scores, 90),
+        np.percentile(esg_scores, 95)
+
     ]
     
+    colors = ['red',
+          'orange', 
+          'lightgreen',
+          'blue',
+          'darkgreen',
+          'brown',
+          'navy']
+
     
-    
-    colors = ['red', 'orange', 'lightgreen', 'blue', 'darkgreen']
     labels = [
         'No ESG Constraint (All stocks)',
         'Top 50% ESG Stocks',
-        'Top 65% ESG Stocks', 
+        'Top 60% ESG Stocks', 
+        'Top 70% ESG Stocks',
         'Top 80% ESG Stocks',
+        'Top 90% ESG Stocks',
         'Top 95% ESG Stocks'
+        
     ]
     
     
     # Print the actual ESG thresholds / varmistus mitkä ne rajat on
     print("ESG Percentile Targets:")
-    percentiles = [0, 30, 50, 70, 95]
+    percentiles = [0, 50, 60, 70, 80, 90, 95]
     for p, target in zip(percentiles, esg_targets):
         print(f"  {p}th percentile: ESG ≥ {target:.1f}")
     
     
     ''' Plotting the figure  '''
     plt.figure(figsize=(12, 8))
-    number_of_points = 10  ## tätä muuttamalla muuttuu frontierin tarkkuus, mutta isommat arvot viä laskutehoo. 100 pistettä ni tulee ok tulokset
+    number_of_points = 3  ## tätä muuttamalla muuttuu frontierin tarkkuus, mutta isommat arvot viä laskutehoo. 100 pistettä ni tulee ok tulokset
     
     for esg_target, color, label in zip(esg_targets, colors, labels): #loop that calculates the efficient frontier with different ESG constraints
                 
@@ -298,12 +320,19 @@ def plot_efficient_surface(ER, Sigma, esg_scores):
     
 if __name__ == "__main__":
     
-    ER, Sigma, esg_scores = load_real_data(returns_file="Yearly_Returns.csv", cov_file="Covariance_Matrix.csv",esg_file="ESG_scores.csv")
-    
+    ER, Sigma, esg_scores = load_real_data(returns_file="Yearly_Returns.csv", cov_file="Covariance_Matrix.csv",esg_file="ESG_scores_MSCI.csv")
+    eigenvals = np.linalg.eigvals(Sigma)
+    print(f"Min eigenvalue: {np.min(eigenvals):.6f}")
+    print(f"Matrix is positive definite: {np.all(eigenvals > 0)}")
     # Plot efficient frontier
     print(f"\n{'='*50}")
     print("PLOTTING EFFICIENT FRONTIER")
     print(f"{'='*50}")
-        
+    
+
+    # Check individual stock returns
+    print(f"Average stock return: {np.mean(ER):.6f}")
+    print(f"Best stock return: {np.max(ER):.6f}")
+            
     plot_multiple_esg_frontiers(ER, Sigma, esg_scores)    
     #plot_efficient_surface(ER, Sigma, esg_scores)
